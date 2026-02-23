@@ -322,6 +322,92 @@ std::string dump_type(const Il2CppType *type) {
     return outPut.str();
 }
 
+void dump_protocol_ids(const char *outDir) {
+    LOGI("scanning protocol IDs...");
+
+    size_t asmSize;
+    auto domain = il2cpp_domain_get();
+    auto assemblies = il2cpp_domain_get_assemblies(domain, &asmSize);
+
+    Il2CppClass *protocolClass = nullptr;
+
+    for (int i = 0; i < asmSize; ++i) {
+        auto image = il2cpp_assembly_get_image(assemblies[i]);
+        auto klass = il2cpp_class_from_name(image, "Torappu.SocketNetwork", "Protocol");
+        if (klass) {
+            protocolClass = klass;
+            break;
+        }
+        klass = il2cpp_class_from_name(image, "", "Protocol");
+        if (klass) {
+            // Verify this is the Protocol base class by confirming it has the
+            // 1-argument constructor: protected .ctor(UInt32 pid)
+            auto ctor = il2cpp_class_get_method_from_name(klass, ".ctor", 1);
+            if (ctor) {
+                protocolClass = klass;
+                break;
+            }
+        }
+    }
+
+    if (!protocolClass) {
+        LOGE("Protocol class not found");
+        return;
+    }
+    LOGI("Found Protocol class: %s", il2cpp_class_get_name(protocolClass));
+
+    auto outPath = std::string(outDir) + "/files/protocol_ids.txt";
+    std::ofstream idStream(outPath);
+    idStream << "# Protocol ID Mapping\n";
+    idStream << "# ClassName\tID\tHexID\n";
+
+    int found = 0;
+
+    for (int i = 0; i < asmSize; ++i) {
+        auto image = il2cpp_assembly_get_image(assemblies[i]);
+        if (!il2cpp_image_get_class) continue; // API unavailable on Unity < 2018.3
+        auto classCount = il2cpp_image_get_class_count(image);
+
+        for (int j = 0; j < classCount; ++j) {
+            auto klass = const_cast<Il2CppClass *>(il2cpp_image_get_class(image, j));
+
+            if (!il2cpp_class_is_subclass_of(klass, protocolClass, false)) continue;
+            if (klass == protocolClass) continue;
+
+            auto flags = il2cpp_class_get_flags(klass);
+            if (flags & TYPE_ATTRIBUTE_ABSTRACT) continue;
+
+            auto ctor = il2cpp_class_get_method_from_name(klass, ".ctor", 0);
+            if (!ctor || !ctor->methodPointer) continue;
+
+            auto className = il2cpp_class_get_name(klass);
+            auto nameSpace = il2cpp_class_get_namespace(klass);
+
+            auto obj = il2cpp_object_new(klass);
+            if (!obj) continue;
+
+            Il2CppException *exc = nullptr;
+            il2cpp_runtime_invoke(ctor, obj, nullptr, &exc);
+
+            if (exc) {
+                LOGW("Exception creating %s", className);
+                continue;
+            }
+
+            // Offset 0x10: Il2CppObject header (klass ptr 8B + monitor ptr 8B) puts
+            // the first instance field (<id>k__BackingField, UInt32) at byte 0x10.
+            uint32_t id = *(uint32_t *) ((char *) obj + 0x10);
+
+            found++;
+            LOGI("[Protocol #%d] %s::%s ID=%u (0x%X)", found, nameSpace, className, id, id);
+            idStream << className << "\t" << std::dec << id << "\t0x" << std::hex << id << "\n";
+        }
+    }
+
+    idStream.close();
+    LOGI("Protocol ID scan done! Found %d protocols. Output: %s", found, outPath.c_str());
+}
+
 void il2cpp_api_init(void *handle) {
     LOGI("il2cpp_handle: %p", handle);
     init_il2cpp_api(handle);
@@ -425,5 +511,6 @@ void il2cpp_dump(const char *outDir) {
         outStream << outPuts[i];
     }
     outStream.close();
+    dump_protocol_ids(outDir);
     LOGI("dump done!");
 }
